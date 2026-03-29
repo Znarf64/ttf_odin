@@ -1050,6 +1050,11 @@ sampling_mask_table_generate :: proc "contextless" (pattern: [$N]int) -> (table:
 	return
 }
 
+coverage_mask_vertical :: proc(y: int, $Bits: int) -> bit_set[0 ..< Bits] {
+	U :: intrinsics.type_bit_set_underlying_type(bit_set[0 ..< Bits])
+	return transmute(bit_set[0 ..< 16])U((1 << uint(15 - y)) - 1)
+}
+
 render_shape_coverage_mask :: proc(
 	font:             Font,
 	shape:            Shape,
