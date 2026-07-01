@@ -828,11 +828,19 @@ font_height_to_scale :: proc(font: Font, font_height: f32) -> f32 {
 
 @(require_results)
 get_bitmap_size :: proc(font: Font, shape: Shape, scale: [2]f32) -> (w: int, h: int) {
-	min   := shape.min * scale
-	max   := shape.max * scale
-	w      = int(math.ceil(max.x) - math.floor(min.x))
-	h      = int(math.ceil(max.y) - math.floor(min.y))
-	return
+	rect := get_bitmap_rect(font, shape, scale)
+	return expand_values(rect.max - rect.min)
+}
+
+Rect :: struct {
+	min, max: [2]int,
+}
+
+@(require_results)
+get_bitmap_rect :: proc(font: Font, shape: Shape, scale: [2]f32) -> Rect {
+	min := la.floor(shape.min * scale)
+	max := la.ceil (shape.max * scale)
+	return { min = ([2]int)(min), max = ([2]int)(max) + 1, }
 }
 
 render_shape_bitmap :: proc(
@@ -846,7 +854,8 @@ render_shape_bitmap :: proc(
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 
 	scale := scale
-	w, h := get_bitmap_size(font, shape, scale)
+	rect  := get_bitmap_rect(font, shape, scale)
+	w, h  := expand_values(rect.max - rect.min)
 	if subpixel {
 		scale.x *= 3
 		w       *= 3
@@ -879,7 +888,7 @@ render_shape_bitmap :: proc(
 	scanline      := make([]u8, w, context.temp_allocator)
 	for y in 0 ..< h {
 		for y_sample in 0 ..< y_samples {
-			render_y := (f32(y) + f32(y_sample) / f32(y_samples)) / scale.y + shape.min.y
+			render_y := (f32(y) + f32(y_sample) / f32(y_samples) + f32(rect.min.y)) / scale.y
 
 			when RANGE {
 				for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
@@ -946,21 +955,17 @@ render_shape_bitmap :: proc(
 
 			current_intersection: int
 			for current_intersection < n - 1 {
-				start := (intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5
-				end   := (intersections[current_intersection + 1] - shape.min.x) * scale.x + 0.5
+				start := intersections[current_intersection + 0] * scale.x - f32(rect.min.x) + 0.5
+				end   := intersections[current_intersection + 1] * scale.x - f32(rect.min.x) + 0.5
 
 				if int(start) == int(end) {
 					scanline[int(start)] += u8((end - start) * max_coverage)
 				} else {
-					if int(start) > 0 {
-						scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
-					}
-					for x in max(int(start), 0) + 1 ..< min(int(end), w) {
+					scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
+					for x in int(start) + 1 ..< int(end) {
 						scanline[x] += 255 / u8(y_samples)
 					}
-					if int(end) < w {
-						scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
-					}
+					scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
 				}
 
 				current_intersection += 2
@@ -1068,7 +1073,8 @@ render_shape_coverage_mask :: proc(
 	P :: type_of(pixels[0])
 
 	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
-	w, h          := get_bitmap_size(font, shape, scale)
+	rect          := get_bitmap_rect(font, shape, scale)
+	w, h          := expand_values(rect.max - rect.min)
 	stride        := stride
 	if stride <= 0 {
 		stride = w
@@ -1082,7 +1088,7 @@ render_shape_coverage_mask :: proc(
 	scanline := make([]P, w, context.temp_allocator)
 	for y in 0 ..< h {
 		for y_sample in 0 ..< N {
-			render_y := (f32(y) + f32(y_sample) / N) / scale.y + shape.min.y
+			render_y := (f32(y) + f32(y_sample) / N + f32(rect.min.y)) / scale.y
 
 			for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
 				beziers_start += 1
@@ -1108,8 +1114,8 @@ render_shape_coverage_mask :: proc(
 			current_intersection: int
 			for current_intersection < n - 1 {
 				x_off := sampling_pattern[N - 1 - y_sample]
-				start := ((intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5) * N - f32(x_off)
-				end   := ((intersections[current_intersection + 1] - shape.min.x) * scale.x - 0.5) * N - f32(x_off)
+				start := (intersections[current_intersection + 0] * scale.x - f32(rect.min.x) + 0.5) * N - f32(x_off)
+				end   := (intersections[current_intersection + 1] * scale.x - f32(rect.min.x) - 0.5) * N - f32(x_off)
 
 				x_start := int(math.round(start / N))
 				x_end   := int(math.round(end   / N))
