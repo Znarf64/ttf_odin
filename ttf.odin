@@ -289,8 +289,8 @@ get_glyph_header :: proc(font: Font, glyph: Glyph) -> ^Glyph_Header {
 	return (^Glyph_Header)(&font.data[font.glyf_offset + int(offset)])
 }
 
-Segment_Linear :: struct { a, b:       [2]f32, }
-Segment_Bezier :: struct { p0, p1, p2: [2]f32, }
+Segment_Linear :: struct #all_or_none { a, b:       [2]f32, up: bool, }
+Segment_Bezier :: struct #all_or_none { p0, p1, p2: [2]f32, up: bool, }
 
 @(require_results)
 get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator) -> (shape: Shape) {
@@ -425,9 +425,9 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 				if .ON_CURVE_POINT in flags[current] {
 					if prev_on {
 						if prev.y < coords[current].y {
-							append(&linears, Segment_Linear { a = prev, b = coords[current], })
+							append(&linears, Segment_Linear { a = prev, b = coords[current], up = true, })
 						} else {
-							append(&linears, Segment_Linear { a = coords[current], b = prev, })
+							append(&linears, Segment_Linear { a = coords[current], b = prev, up = false, })
 						}
 					} else {
 						prev_on = true
@@ -441,10 +441,12 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 							append(beziers, bezier)
 						}
 
-						bezier := bezier
+						bezier   := bezier
+						bezier.up = true
 
 						if bezier.p0.y > bezier.p2.y {
 							bezier.p0, bezier.p2 = bezier.p2, bezier.p0
+							bezier.up            = false
 						}
 						denom := bezier.p0.y - 2 * bezier.p1.y + bezier.p2.y
 						if abs(denom) < 0.0001 {
@@ -460,11 +462,11 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 								s  := math.lerp(q0,        q1,        t_split)
 
 								if bezier.p1.y > bezier.p2.y {
-									push(beziers, Segment_Bezier { bezier.p0, q0, s, })
-									push(beziers, Segment_Bezier { bezier.p2, q1, s, })
+									push(beziers, Segment_Bezier { p0 = bezier.p0, p1 = q0, p2 = s,         up = !bezier.up, })
+									push(beziers, Segment_Bezier { p0 = bezier.p2, p1 = q1, p2 = s,         up = bezier.up,  })
 								} else {
-									push(beziers, Segment_Bezier { s, q0, bezier.p0, })
-									push(beziers, Segment_Bezier { s, q1, bezier.p2, })
+									push(beziers, Segment_Bezier { p0 = s,         p1 = q0, p2 = bezier.p0, up = bezier.up, })
+									push(beziers, Segment_Bezier { p0 = s,         p1 = q1, p2 = bezier.p2, up = !bezier.up,  })
 								}
 							} else {
 								push(beziers, bezier)
@@ -478,12 +480,12 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 					}
 
 					if .ON_CURVE_POINT in flags[next] {
-						insert_bezier(&beziers, { p0 = prev, p1 = coords[current], p2 = coords[next], })
+						insert_bezier(&beziers, { p0 = prev, p1 = coords[current], p2 = coords[next], up = {} /* will get set in `insert_bezier` */, })
 						prev     = coords[next]
 						current += 1
 					} else {
 						mid := (coords[current] + coords[next]) / 2
-						insert_bezier(&beziers, { p0 = prev, p1 = coords[current], p2 = mid, })
+						insert_bezier(&beziers, { p0 = prev, p1 = coords[current], p2 = mid, up = {} /* will get set in `insert_bezier` */,  })
 						prev = mid
 					}
 				}
@@ -693,12 +695,22 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 	return
 }
 
+Intersection :: struct #all_or_none {
+	x:  f32,
+	up: bool,
+}
+
 get_intersections :: proc(
 	beziers:       []Segment_Bezier,
 	linears:       []Segment_Linear,
 	y:             f32,
-	intersections: []f32,
+	intersections: []Intersection,
 ) -> (n_intersections: int) {
+	@(require_results)
+	intersection_compare :: proc(a, b: Intersection) -> bool {
+		return a.x < b.x
+	}
+
 	for linear in linears {
 		if !(linear.a.y <= y && y < linear.b.y) {
 			continue
@@ -707,12 +719,10 @@ get_intersections :: proc(
 		t  := (y - linear.a.y) / (linear.b.y - linear.a.y)
 		vx := (1 - t) * linear.a.x + t * linear.b.x
 
-		intersections[n_intersections] = vx
+		intersections[n_intersections] = { x = vx, up = linear.up, }
 		n_intersections               += 1
 
-		heap.push(intersections[:n_intersections], proc(a, b: f32) -> bool {
-			return a < b
-		})
+		heap.push(intersections[:n_intersections], intersection_compare)
 	}
 
 	for bezier in beziers {
@@ -732,17 +742,13 @@ get_intersections :: proc(
 	    }
 
 		vx                            := math.lerp(math.lerp(bezier.p0.x, bezier.p1.x, t), math.lerp(bezier.p1.x, bezier.p2.x, t), t)
-		intersections[n_intersections] = vx
+		intersections[n_intersections] = { x = vx, up = bezier.up, }
 		n_intersections               += 1
 
-		heap.push(intersections[:n_intersections], proc(a, b: f32) -> bool {
-			return a < b
-		})
+		heap.push(intersections[:n_intersections], intersection_compare)
 	}
 
-	heap.sort(intersections[:n_intersections], proc(a, b: f32) -> bool {
-		return a < b
-	})
+	heap.sort(intersections[:n_intersections], intersection_compare)
 
 	return
 }
@@ -868,7 +874,7 @@ render_shape_bitmap :: proc(
 
 	assert(len(pixels) >= stride * h)
 
-	y_samples    := h < 10 ? 15 : 5
+	y_samples    := h < 16 ? 15 : 5
 	max_coverage := f32(255 / y_samples)
 	assert(255 % y_samples == 0)
 
@@ -884,7 +890,7 @@ render_shape_bitmap :: proc(
 		linears        := shape.linears
 	}
 
-	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
+	intersections := make([]Intersection, len(shape.linears) + len(shape.beziers), context.temp_allocator)
 	scanline      := make([]u8, w, context.temp_allocator)
 	for y in 0 ..< h {
 		for y_sample in 0 ..< y_samples {
@@ -943,20 +949,36 @@ render_shape_bitmap :: proc(
 			}
 
 			when RANGE {
-				n := get_intersections(
+				n_intersections := get_intersections(
 					shape.beziers[beziers_start:beziers_end],
 					shape.linears[linears_start:linears_end],
 					render_y,
 					intersections,
 				)
 			} else {
-				n := get_intersections(active_beziers[:], active_linears[:], render_y, intersections)
+				n_intersections := get_intersections(active_beziers[:], active_linears[:], render_y, intersections)
 			}
 
+			current_balance:      int
 			current_intersection: int
-			for current_intersection < n - 1 {
-				start := intersections[current_intersection + 0] * scale.x - f32(rect.min.x) + 0.5
-				end   := intersections[current_intersection + 1] * scale.x - f32(rect.min.x) + 0.5
+			for current_intersection < n_intersections {
+				a                    := intersections[current_intersection]
+				current_intersection += 1
+				current_balance      += int(a.up) * 2 - 1
+
+				b: Intersection
+				for current_intersection < n_intersections && current_balance != 0 /* this should be >0 but some fonts are weird (or there is a bug somewhere :/) */ {
+					b                     = intersections[current_intersection]
+					current_intersection += 1
+					current_balance      += int(b.up) * 2 - 1
+				}
+
+				if current_balance != 0 {
+					break
+				}
+
+				start := a.x * scale.x - f32(rect.min.x) + 0.5
+				end   := b.x * scale.x - f32(rect.min.x) + 0.5
 
 				if int(start) == int(end) {
 					scanline[int(start)] += u8((end - start) * max_coverage)
@@ -967,8 +989,6 @@ render_shape_bitmap :: proc(
 					}
 					scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
 				}
-
-				current_intersection += 2
 			}
 		}
 
@@ -1072,7 +1092,7 @@ render_shape_coverage_mask :: proc(
 
 	P :: type_of(pixels[0])
 
-	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
+	intersections := make([]Intersection, len(shape.linears) + len(shape.beziers), context.temp_allocator)
 	rect          := get_bitmap_rect(font, shape, scale)
 	w, h          := expand_values(rect.max - rect.min)
 	stride        := stride
@@ -1114,8 +1134,8 @@ render_shape_coverage_mask :: proc(
 			current_intersection: int
 			for current_intersection < n - 1 {
 				x_off := sampling_pattern[N - 1 - y_sample]
-				start := (intersections[current_intersection + 0] * scale.x - f32(rect.min.x) + 0.5) * N - f32(x_off)
-				end   := (intersections[current_intersection + 1] * scale.x - f32(rect.min.x) - 0.5) * N - f32(x_off)
+				start := (intersections[current_intersection + 0].x * scale.x - f32(rect.min.x) + 0.5) * N - f32(x_off)
+				end   := (intersections[current_intersection + 1].x * scale.x - f32(rect.min.x) - 0.5) * N - f32(x_off)
 
 				x_start := int(math.round(start / N))
 				x_end   := int(math.round(end   / N))
