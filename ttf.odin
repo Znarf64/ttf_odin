@@ -1,28 +1,28 @@
 package ttf_odin
 
-import "base:intrinsics"
-import "base:runtime"
+import intrinsics "base:intrinsics"
+import runtime    "base:runtime"
 
-import "core:fmt"
-import "core:mem"
-import "core:slice"
-import "core:slice/heap"
-import "core:strings"
-import "core:time"
-import "core:math"
-import la "core:math/linalg"
-import "core:prof/spall"
-import "core:os"
+import fmt        "core:fmt"
+import mem        "core:mem"
+import slice      "core:slice"
+import heap       "core:slice/heap"
+import strings    "core:strings"
+import time       "core:time"
+import math       "core:math"
+import la         "core:math/linalg"
+import spall      "core:prof/spall"
+import os         "core:os"
 
-import stbi  "vendor:stb/image"
-import stbtt "vendor:stb/truetype"
+import stbi       "vendor:stb/image"
+import stbtt      "vendor:stb/truetype"
 
 spall_ctx: spall.Context
 @(thread_local)
 spall_buffer: spall.Buffer
 
 File_Header :: struct {
-	sfntVesion:    u32be,
+	sfntVersion:   u32be,
 	numTables:     u16be,
 	searchRange:   u16be,
 	entrySelector: u16be,
@@ -103,13 +103,36 @@ read_typed :: proc(bytes: []byte, $T: typeid, offset: int) -> (ret: T, ok: bool)
 }
 
 @(require_results)
-load :: proc(data: []byte) -> (font: Font, ok: bool) {
+load :: proc(data: []byte, index := -1) -> (font: Font, ok: bool) {
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 
 	font.data = data
 
-	header := read_typed(data, File_Header, 0) or_return
-	tables := ([^]Table_Record)(&data[size_of(header)])[:header.numTables]
+	magic  := read_typed(data, [4]byte, 0) or_return
+	offset := 0
+
+	if magic == "ttcf" {
+		TTC_Header :: struct {
+			ttcTag:       [4]byte `fmt:"s"`,
+			majorVersion: u16be,
+			minorVersion: u16be,
+			numFonts:     u32be,
+		}
+		header := read_typed(data, TTC_Header, 0) or_return
+
+		if index >= int(header.numFonts) || index < 0 {
+			return
+		}
+
+		offset = int(read_typed(data, u32be, size_of(header) + index * size_of(u32be)) or_return)
+	}
+
+	header := read_typed(data, File_Header, offset) or_return
+	tables := ([^]Table_Record)(&data[offset + size_of(header)])[:header.numTables]
+
+	if header.sfntVersion != 0x00010000 {
+		return
+	}
 
 	for &table in tables {
 		name := strings.truncate_to_byte(string(table.tableTag[:]), 0)
